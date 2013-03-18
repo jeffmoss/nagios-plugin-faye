@@ -1,0 +1,113 @@
+#!/usr/bin/env ruby
+
+require "rubygems"
+require "bundler/setup"
+require 'eventmachine'
+require 'faye'
+require 'optparse'
+require 'timeout'
+require 'net/http'
+require 'json'
+
+$options = {}
+
+ARGV.options do |opts|
+  opts.banner = "Usage: check_faye [options]"
+
+  opts.on("-w", "--warning LEVEL", Integer, "Warning level") do |warning|
+    $options[:warning] = warning
+  end
+
+  opts.on("-c", "--critical LEVEL", Integer, "Critical level") do |critical|
+    $options[:critical] = critical
+  end
+
+  opts.on("-v", "--[no-]verbose", "Run verbosely") do |v|
+    $options[:verbose] = v
+  end
+
+  opts.on('-s', "--server SERVER", String, "URL of faye server") do |server|
+    $options[:server] = server
+  end
+
+  opts.on('-n', "--channel CHANNEL", String, "Channel name") do |channel|
+    $options[:channel] = channel
+  end
+
+  opts.on('-t', "--trigger TRIGGER", String, "URL (GET) of ping trigger") do |trigger|
+    $options[:trigger] = trigger
+  end
+
+  opts.on_tail("-h", "--help", "Show this message") do
+    puts opts
+    exit
+  end
+
+  opts.parse!
+end
+
+CHANNEL_TIMEOUT = 10
+CONNECT_TIMEOUT = 5
+
+$options[:warning]  ||= 2
+$options[:critical] ||= 5
+
+def server_trigger(uri, msg)
+  http = EventMachine::HttpRequest.new(uri, :connect_timeout => CONNECT_TIMEOUT)
+  req = http.get :keepalive => false, :query => {:msg => msg}
+  req.errback do
+    report_failure "Couldn't trigger the ping request"
+  end
+end
+
+def report_failure(msg)
+  $exit_status = 2
+
+  perfdata = "|time=#{CHANNEL_TIMEOUT};#{$options[:warning]};#{$options[:critical]};#{CHANNEL_TIMEOUT};"
+  puts "CRITICAL - #{msg}#{perfdata}"
+
+  EM.stop
+end
+
+def report_success(msg, time)
+  perfdata = "|time=#{time};#{$options[:warning]};#{$options[:critical]};#{CHANNEL_TIMEOUT};"
+
+  if time > $options[:critical]
+    puts "CRITICAL - #{msg} took longer than #{$options[:critical]} seconds#{perfdata}"
+    $exit_status = 2
+  elsif time > $options[:warning]
+    puts "WARNING - #{msg} took longer than #{$options[:critical]} seconds#{perfdata}"
+    $exit_status = 1
+  else
+    puts "OK - #{msg}#{perfdata}"
+    $exit_status = 0
+  end
+
+  EM.stop
+end
+
+seed = "Pong " + rand(Time.now.to_i).to_s
+started = Time.now
+
+EM.run do
+  client = Faye::Client.new($options[:server])
+
+  subscription = client.subscribe($options[:channel]) do |message|
+    if message == seed
+      subscription.cancel()
+      report_success("Received: '#{message}'", Time.now - started)
+    end
+  end
+
+  subscription.callback do
+    if $options[:trigger]
+      server_trigger($options[:trigger], seed)
+    else
+      client.publish($options[:channel], seed)
+    end
+
+    EM.add_timer(CHANNEL_TIMEOUT) { report_failure("Timed out afte #{CHANNEL_TIMEOUT} seconds.") }
+  end
+end
+
+exit($exit_status)
