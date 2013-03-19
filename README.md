@@ -1,8 +1,10 @@
-= check_faye
+check_faye
+==========
 
 Use this nagios plugin to monitor a faye setup.
 
-= License
+License
+=======
 
 Copyright (c) 2013 Jeff Moss
 
